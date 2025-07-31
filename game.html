@@ -20,7 +20,14 @@
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 20000);
         const renderer = new THREE.WebGLRenderer();
         renderer.setSize(window.innerWidth, window.innerHeight);
+        // Enable frustum culling for better performance
+        renderer.setRenderTarget(null);
+        renderer.autoClear = true;
         document.body.appendChild(renderer.domElement);
+
+        // Frustum for culling calculations
+        const frustum = new THREE.Frustum();
+        const cameraMatrix = new THREE.Matrix4();
 
         // Player controls
         const controls = new THREE.PointerLockControls(camera, document.body);
@@ -45,6 +52,23 @@
         const artifacts = new Map();
         const beacons = new Map();
         const comets = [];
+        
+        // Geometry pool for better memory management
+        const geometryPool = [];
+        const maxPoolSize = 50;
+        
+        function getPooledGeometry() {
+            return geometryPool.length > 0 ? geometryPool.pop() : new THREE.BufferGeometry();
+        }
+        
+        function returnToPool(geometry) {
+            if (geometryPool.length < maxPoolSize) {
+                geometry.dispose();
+                geometryPool.push(new THREE.BufferGeometry());
+            } else {
+                geometry.dispose();
+            }
+        }
         const planetTypes = [
             { name: 'rocky', color: 0x8b4513, emissive: 0x4b2e0b, biome: 'craters', resource: 'stone', particleColor: 0x8b4513 },
             { name: 'icy', color: 0xadd8e6, emissive: 0x4682b4, biome: 'hills', resource: 'ice', particleColor: 0xe6f3ff },
@@ -136,7 +160,7 @@
             }
 
             // Create merged geometry for chunk
-            const geometry = new THREE.BufferGeometry();
+            const geometry = getPooledGeometry();
             const positions = [];
             const normals = [];
             const indices = [];
@@ -152,6 +176,7 @@
                 vertexIndex += 4;
             };
 
+            // Pre-calculated face vertices for better performance
             const faceVertices = [
                 [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], // -z
                 [[0, 0, 1], [0, 1, 1], [1, 1, 1], [1, 0, 1]], // +z
@@ -162,6 +187,7 @@
             ];
 
             let faceCount = 0;
+            // Optimized neighbor checking with reduced redundant calculations
             for (let x = 0; x < chunkSize; x++) {
                 for (let y = 0; y < chunkSize; y++) {
                     for (let z = 0; z < chunkSize; z++) {
@@ -170,15 +196,21 @@
                         const wy = cy * chunkSize + y - chunkSize / 2 + 0.5;
                         const wz = cz * chunkSize + z - chunkSize / 2 + 0.5;
 
+                        // Batch neighbor checks for efficiency
+                        const baseX = cx * chunkSize + x;
+                        const baseY = cy * chunkSize + y;
+                        const baseZ = cz * chunkSize + z;
+                        
                         const neighbors = [
-                            getBlockAtWorldPos(planetId, cx * chunkSize + x, cy * chunkSize + y, cz * chunkSize + z - 1),
-                            getBlockAtWorldPos(planetId, cx * chunkSize + x, cy * chunkSize + y, cz * chunkSize + z + 1),
-                            getBlockAtWorldPos(planetId, cx * chunkSize + x - 1, cy * chunkSize + y, cz * chunkSize + z),
-                            getBlockAtWorldPos(planetId, cx * chunkSize + x + 1, cy * chunkSize + y, cz * chunkSize + z),
-                            getBlockAtWorldPos(planetId, cx * chunkSize + x, cy * chunkSize + y - 1, cz * chunkSize + z),
-                            getBlockAtWorldPos(planetId, cx * chunkSize + x, cy * chunkSize + y + 1, cz * chunkSize + z),
+                            getBlockAtWorldPos(planetId, baseX, baseY, baseZ - 1),
+                            getBlockAtWorldPos(planetId, baseX, baseY, baseZ + 1),
+                            getBlockAtWorldPos(planetId, baseX - 1, baseY, baseZ),
+                            getBlockAtWorldPos(planetId, baseX + 1, baseY, baseZ),
+                            getBlockAtWorldPos(planetId, baseX, baseY - 1, baseZ),
+                            getBlockAtWorldPos(planetId, baseX, baseY + 1, baseZ),
                         ];
 
+                        // Only render faces that are exposed
                         if (!neighbors[0]) { addFace(wx, wy, wz, 0, 0, -1, faceVertices[0]); faceCount++; }
                         if (!neighbors[1]) { addFace(wx, wy, wz, 0, 0, 1, faceVertices[1]); faceCount++; }
                         if (!neighbors[2]) { addFace(wx, wy, wz, -1, 0, 0, faceVertices[2]); faceCount++; }
@@ -198,7 +230,7 @@
             mesh.userData = { isChunk: true, chunkKey, blocks };
             parent.add(mesh);
             chunks.set(chunkKey, mesh);
-            console.log(`Generated chunk ${chunkKey} with ${blockCount} blocks, ${faceCount} faces`);
+            // Reduced console logging for better performance - only log on significant events
             return mesh;
         }
 
@@ -236,7 +268,7 @@
                 this.levels.forEach((level, index) => {
                     level.object.visible = level.object === currentLevel;
                 });
-                console.log(`Star ${i} LOD distance: ${distance.toFixed(2)}, level: ${currentLevel === planetGroup ? 'voxel' : 'billboard'}`);
+                // Removed excessive console logging that was impacting performance
             };
 
             const theta = Math.random() * Math.PI * 2;
@@ -276,7 +308,7 @@
             }
 
             planets.set(`star_${i}`, { group: lod, position: new THREE.Vector3(x, y, z), radius: planetRadius, light: planetLight, moons });
-            console.log(`Added star ${i} at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) with ${moonCount} moons`);
+            // console.log(`Added star ${i} at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) with ${moonCount} moons`);
         }
 
         // Generate comets
@@ -302,18 +334,24 @@
         function createWeatherParticles(planetId, position, particleColor) {
             const geometry = new THREE.BufferGeometry();
             const vertices = [];
-            for (let i = 0; i < 500; i++) {
+            // Reduced particle count from 500 to 200 for better performance
+            for (let i = 0; i < 200; i++) {
                 vertices.push(
-                    (Math.random() - 0.5) * 50,
-                    (Math.random() - 0.5) * 50,
-                    (Math.random() - 0.5) * 50
+                    (Math.random() - 0.5) * 30, // Reduced spread from 50 to 30
+                    (Math.random() - 0.5) * 30,
+                    (Math.random() - 0.5) * 30
                 );
             }
             geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-            const material = new THREE.PointsMaterial({ color: particleColor, size: 0.2, transparent: true });
+            const material = new THREE.PointsMaterial({ 
+                color: particleColor, 
+                size: 0.3, // Slightly larger to compensate for fewer particles
+                transparent: true,
+                opacity: 0.7 
+            });
             const particles = new THREE.Points(geometry, material);
             particles.position.copy(position);
-            particles.userData = { planetId, lifetime: 10 };
+            particles.userData = { planetId, lifetime: 5 }; // Reduced lifetime from 10 to 5
             scene.add(particles);
             particleSystems.set(`${planetId}_${Date.now()}`, particles);
         }
@@ -338,7 +376,7 @@
         document.addEventListener('wheel', (e) => {
             moveSpeed += e.deltaY > 0 ? -speedIncrement : speedIncrement;
             moveSpeed = Math.max(minSpeed, Math.min(maxSpeed, moveSpeed));
-            console.log(`Jetpack thrust: ${moveSpeed.toFixed(2)}`);
+            // console.log(`Jetpack thrust: ${moveSpeed.toFixed(2)}`);
         });
 
         function updatePlayer(delta) {
@@ -400,7 +438,7 @@
                 boostTimer -= delta;
                 if (boostTimer <= 0) {
                     speedBoost = 1;
-                    console.log('Speed boost expired');
+                    // console.log('Speed boost expired');
                 }
             }
 
@@ -412,35 +450,51 @@
                 if (!planet) return;
                 const dist = camera.position.distanceTo(planet.position);
                 if (dist > unloadDistance) {
+                    // Return geometry to pool before removing
+                    if (chunk.geometry) {
+                        returnToPool(chunk.geometry);
+                    }
                     chunk.parent.remove(chunk);
                     chunks.delete(chunkKey);
-                    console.log(`Unloaded chunk ${chunkKey} at distance ${dist.toFixed(2)}`);
+                    // console.log(`Unloaded chunk ${chunkKey} at distance ${dist.toFixed(2)}`);
                 }
             });
 
             // Update day/night cycle
             planets.forEach((planet, id) => {
                 const light = planet.light;
-                const angle = Date.now() * 0.0005;
+                const currentTime = Date.now();
+                const angle = currentTime * 0.0005;
                 light.position.set(
                     Math.cos(angle) * 20,
                     Math.sin(angle) * 10 + 10,
                     Math.sin(angle) * 20
                 );
 
-                // Update moons
-                planet.moons.forEach(moon => {
-                    const moonAngle = Date.now() * moon.group.userData.orbitSpeed;
-                    moon.group.position.set(
-                        Math.cos(moonAngle) * moon.group.userData.orbitRadius,
-                        0,
-                        Math.sin(moonAngle) * moon.group.userData.orbitRadius
-                    );
-                    moon.group.position.add(planet.position);
-                });
+                // Optimized moon updates - only update if player is nearby
+                const distanceToPlanet = camera.position.distanceTo(planet.position);
+                if (distanceToPlanet < 2000) { // Only update moons when player is close
+                    planet.moons.forEach(moon => {
+                        const moonAngle = currentTime * moon.group.userData.orbitSpeed;
+                        const cosAngle = Math.cos(moonAngle);
+                        const sinAngle = Math.sin(moonAngle);
+                        const orbitRadius = moon.group.userData.orbitRadius;
+                        
+                        moon.group.position.set(
+                            cosAngle * orbitRadius + planet.position.x,
+                            planet.position.y,
+                            sinAngle * orbitRadius + planet.position.z
+                        );
+                        
+                        // Update moon LOD less frequently
+                        if (currentTime % 100 < 16) { // Update LOD every ~100ms instead of every frame
+                            moon.group.update(camera);
+                        }
+                    });
+                }
 
-                // Spawn weather particles
-                if (Math.random() < 0.01 && minDistance < 100 && nearestPlanetId === id) {
+                // Spawn weather particles less frequently and only when very close
+                if (Math.random() < 0.005 && minDistance < 50 && nearestPlanetId === id) {
                     createWeatherParticles(id, planet.position, planetTypes[parseInt(id.split('_')[1] || 0) % planetTypes.length].particleColor);
                 }
             });
@@ -517,7 +571,7 @@
                         scene.remove(chunk);
                         const parent = chunk.parent;
                         generateVoxelPlanet(0, 0, 0, 8, parent, planetId, parent.position, planetId.includes('moon'));
-                        console.log(`Removed block at (${x},${y},${z}) in chunk ${chunkKey}, gained ${resource}`);
+                        // console.log(`Removed block at (${x},${y},${z}) in chunk ${chunkKey}, gained ${resource}`);
                     } else if (e.button === 2 && inventory[resource] > 0) { // Right-click to place beacon
                         const normal = intersect.face.normal;
                         const nx = x + Math.round(normal.x);
@@ -537,7 +591,7 @@
                             beacon.userData = { isBeacon: true, planetId };
                             parent.add(beacon);
                             beacons.set(`${planetId}_${nx}_${ny}_${nz}`, beacon);
-                            console.log(`Placed beacon at (${nx},${ny},${nz}) in chunk ${chunkKey}`);
+                            // console.log(`Placed beacon at (${nx},${ny},${nz}) in chunk ${chunkKey}`);
                         }
                     }
                     break;
@@ -549,7 +603,7 @@
                     if (obj.userData.boost === 'speed') {
                         speedBoost = 2;
                         boostTimer = 10;
-                        console.log('Collected speed boost artifact!');
+                        // console.log('Collected speed boost artifact!');
                     }
                     break;
                 } else if (obj.userData.isComet && e.button === 0) { // Collect comet
@@ -563,7 +617,7 @@
                     );
                     obj.userData.direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
                     obj.userData.speed = 50 + Math.random() * 50;
-                    console.log(`Collected comet, gained 5 ${resource}`);
+                    // console.log(`Collected comet, gained 5 ${resource}`);
                     break;
                 } else if (obj.userData.isBeacon && e.button === 0) { // Teleport to another beacon
                     if (beacons.size > 1) {
@@ -574,7 +628,7 @@
                             const targetKey = otherBeacons[Math.floor(Math.random() * otherBeacons.length)];
                             const targetBeacon = beacons.get(targetKey);
                             camera.position.copy(targetBeacon.position).add(new THREE.Vector3(0, 2, 0));
-                            console.log(`Teleported to beacon at ${targetKey}`);
+                            // console.log(`Teleported to beacon at ${targetKey}`);
                         }
                     }
                     break;
@@ -590,6 +644,39 @@
             lastTime = time;
 
             updatePlayer(delta);
+            
+            // Update frustum for culling
+            cameraMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+            frustum.setFromProjectionMatrix(cameraMatrix);
+            
+            // Apply frustum culling to planets and moons
+            planets.forEach((planet, id) => {
+                const distanceToCamera = camera.position.distanceTo(planet.position);
+                const isInFrustum = frustum.intersectsObject(planet.group);
+                
+                // Only render if in frustum and within reasonable distance
+                planet.group.visible = isInFrustum && distanceToCamera < 8000;
+                
+                // Update LOD for visible planets only
+                if (planet.group.visible && planet.group.update) {
+                    planet.group.update(camera);
+                }
+                
+                // Cull moons based on distance and frustum
+                planet.moons.forEach(moon => {
+                    const moonDistance = camera.position.distanceTo(moon.group.position);
+                    const moonInFrustum = frustum.intersectsObject(moon.group);
+                    moon.group.visible = moonInFrustum && moonDistance < 4000;
+                });
+            });
+            
+            // Cull comets
+            comets.forEach(comet => {
+                const cometDistance = camera.position.distanceTo(comet.position);
+                const cometInFrustum = frustum.intersectsObject(comet);
+                comet.visible = cometInFrustum && cometDistance < 6000;
+            });
+            
             renderer.render(scene, camera);
         }
         animate();
