@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Space Voxel Game</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+        #hud { position: absolute; top: 10px; left: 10px; color: white; font-family: Arial, sans-serif; font-size: 16px; }
+    </style>
+</head>
+<body>
+    <div id="hud"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/controls/PointerLockControls.js"></script>
+    <script>
+        // Scene setup
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 20000);
+        const renderer = new THREE.WebGLRenderer();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Player controls
+        const controls = new THREE.PointerLockControls(camera, document.body);
+        document.addEventListener('click', () => controls.lock());
+        camera.position.set(0, 10, 20);
+
+        // Nebula skybox
+        const skyboxGeometry = new THREE.SphereGeometry(10000, 32, 32);
+        const skyboxMaterial = new THREE.MeshBasicMaterial({
+            color: 0x1a0b33,
+            side: THREE.BackSide,
+            map: new THREE.TextureLoader().load('https://threejs.org/examples/textures/stars.png')
+        });
+        const skybox = new THREE.Mesh(skyboxGeometry, skyboxMaterial);
+        scene.add(skybox);
+
+        // Voxel chunk system
+        const blockSize = 1;
+        const chunkSize = 16;
+        const chunks = new Map();
+        const planets = new Map();
+        const artifacts = new Map();
+        const beacons = new Map();
+        const comets = [];
+        const planetTypes = [
+            { name: 'rocky', color: 0x8b4513, emissive: 0x4b2e0b, biome: 'craters', resource: 'stone', particleColor: 0x8b4513 },
+            { name: 'icy', color: 0xadd8e6, emissive: 0x4682b4, biome: 'hills', resource: 'ice', particleColor: 0xe6f3ff },
+            { name: 'grassy', color: 0x228b22, emissive: 0x114511, biome: 'plains', resource: 'grass', particleColor: 0x33cc33 }
+        ];
+
+        // Inventory
+        let inventory = { stone: 0, ice: 0, grass: 0 };
+
+        function getPlanetMaterial(planetId) {
+            const typeIndex = parseInt(planetId.split('_')[1] || 0) % planetTypes.length;
+            const type = planetTypes[typeIndex];
+            return new THREE.MeshStandardMaterial({
+                color: type.color,
+                emissive: type.emissive,
+                emissiveIntensity: 0.2,
+                side: THREE.DoubleSide
+            });
+        }
+
+        function getBlockAtWorldPos(planetId, wx, wy, wz) {
+            const cx = Math.floor(wx / chunkSize);
+            const cy = Math.floor(wy / chunkSize);
+            const cz = Math.floor(wz / chunkSize);
+            const chunkKey = `${planetId}_${cx},${cy},${cz}`;
+            const chunk = chunks.get(chunkKey);
+            if (!chunk) return false;
+
+            const lx = ((wx % chunkSize) + chunkSize) % chunkSize;
+            const ly = ((wy % chunkSize) + chunkSize) % chunkSize;
+            const lz = ((wz % chunkSize) + chunkSize) % chunkSize;
+            return chunk.userData.blocks[lx][ly][lz] === 1;
+        }
+
+        function generateVoxelPlanet(cx, cy, cz, radius, parent, planetId, position, isMoon = false) {
+            const chunkKey = `${planetId}_${cx},${cy},${cz}`;
+            if (chunks.has(chunkKey)) return chunks.get(chunkKey);
+
+            const typeIndex = parseInt(planetId.split('_')[1] || 0) % planetTypes.length;
+            const type = planetTypes[typeIndex];
+            const biome = type.biome;
+
+            const blocks = new Array(chunkSize).fill().map(() => new Array(chunkSize).fill().map(() => new Array(chunkSize).fill(0)));
+            let blockCount = 0;
+            for (let x = 0; x < chunkSize; x++) {
+                for (let y = 0; y < chunkSize; y++) {
+                    for (let z = 0; z < chunkSize; z++) {
+                        const wx = cx * chunkSize + x - chunkSize / 2;
+                        const wy = cy * chunkSize + y - chunkSize / 2;
+                        const wz = cz * chunkSize + z - chunkSize / 2;
+                        const dist = Math.sqrt(wx * wx + wy * wy + wz * wz);
+                        let heightMod = 0;
+                        if (biome === 'craters') {
+                            heightMod = Math.sin(wx * 0.1) * Math.cos(wz * 0.1) * (isMoon ? 1 : 2);
+                        } else if (biome === 'hills') {
+                            heightMod = Math.sin(wx * 0.05 + wz * 0.05) * (isMoon ? 2 : 3);
+                        } else if (biome === 'plains') {
+                            heightMod = Math.random() * (isMoon ? 0.3 : 0.5);
+                        }
+                        if (dist < radius + heightMod) {
+                            blocks[x][y][z] = 1;
+                            blockCount++;
+                        }
+                    }
+                }
+            }
+
+            // Add artifacts (less frequent on moons)
+            if (Math.random() < (isMoon ? 0.05 : 0.1)) {
+                for (let i = 0; i < (isMoon ? 1 : 2); i++) {
+                    const x = Math.floor(Math.random() * chunkSize);
+                    const y = Math.floor(Math.random() * chunkSize);
+                    const z = Math.floor(Math.random() * chunkSize);
+                    if (blocks[x][y][z]) {
+                        const artifact = new THREE.Mesh(
+                            new THREE.SphereGeometry(0.5, 16, 16),
+                            new THREE.MeshBasicMaterial({ color: 0xff00ff, emissive: 0xff00ff, emissiveIntensity: 1 })
+                        );
+                        artifact.position.set(
+                            cx * chunkSize + x - chunkSize / 2 + 0.5,
+                            cy * chunkSize + y - chunkSize / 2 + 1.5,
+                            cz * chunkSize + z - chunkSize / 2 + 0.5
+                        );
+                        artifact.userData = { isArtifact: true, boost: 'speed', planetId };
+                        parent.add(artifact);
+                        artifacts.set(`${planetId}_${x}_${y}_${z}`, artifact);
+                    }
+                }
+            }
+
+            // Create merged geometry for chunk
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const normals = [];
+            const indices = [];
+            let vertexIndex = 0;
+
+            const addFace = (x, y, z, nx, ny, nz, vertices) => {
+                const idx = positions.length / 3;
+                for (const v of vertices) {
+                    positions.push(x + v[0], y + v[1], z + v[2]);
+                    normals.push(nx, ny, nz);
+                }
+                indices.push(idx, idx + 1, idx + 2, idx + 2, idx + 3, idx);
+                vertexIndex += 4;
+            };
+
+            const faceVertices = [
+                [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], // -z
+                [[0, 0, 1], [0, 1, 1], [1, 1, 1], [1, 0, 1]], // +z
+                [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]], // -x
+                [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]], // +x
+                [[0, 0, 0], [0, 0, 1], [1, 0, 1], [1, 0, 0]], // -y
+                [[0, 1, 0], [1, 1, 0], [1, 1, 1], [0, 1, 1]], // +y
+            ];
+
+            let faceCount = 0;
+            for (let x = 0; x < chunkSize; x++) {
+                for (let y = 0; y < chunkSize; y++) {
+                    for (let z = 0; z < chunkSize; z++) {
+                        if (!blocks[x][y][z]) continue;
+                        const wx = cx * chunkSize + x - chunkSize / 2 + 0.5;
+                        const wy = cy * chunkSize + y - chunkSize / 2 + 0.5;
+                        const wz = cz * chunkSize + z - chunkSize / 2 + 0.5;
+
+                        const neighbors = [
+                            getBlockAtWorldPos(planetId, cx * chunkSize + x, cy * chunkSize + y, cz * chunkSize + z - 1),
+                            getBlockAtWorldPos(planetId, cx * chunkSize + x, cy * chunkSize + y, cz * chunkSize + z + 1),
+                            getBlockAtWorldPos(planetId, cx * chunkSize + x - 1, cy * chunkSize + y, cz * chunkSize + z),
+                            getBlockAtWorldPos(planetId, cx * chunkSize + x + 1, cy * chunkSize + y, cz * chunkSize + z),
+                            getBlockAtWorldPos(planetId, cx * chunkSize + x, cy * chunkSize + y - 1, cz * chunkSize + z),
+                            getBlockAtWorldPos(planetId, cx * chunkSize + x, cy * chunkSize + y + 1, cz * chunkSize + z),
+                        ];
+
+                        if (!neighbors[0]) { addFace(wx, wy, wz, 0, 0, -1, faceVertices[0]); faceCount++; }
+                        if (!neighbors[1]) { addFace(wx, wy, wz, 0, 0, 1, faceVertices[1]); faceCount++; }
+                        if (!neighbors[2]) { addFace(wx, wy, wz, -1, 0, 0, faceVertices[2]); faceCount++; }
+                        if (!neighbors[3]) { addFace(wx, wy, wz, 1, 0, 0, faceVertices[3]); faceCount++; }
+                        if (!neighbors[4]) { addFace(wx, wy, wz, 0, -1, 0, faceVertices[4]); faceCount++; }
+                        if (!neighbors[5]) { addFace(wx, wy, wz, 0, 1, 0, faceVertices[5]); faceCount++; }
+                    }
+                }
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+            geometry.setIndex(indices);
+            geometry.computeVertexNormals();
+            const material = getPlanetMaterial(planetId);
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.userData = { isChunk: true, chunkKey, blocks };
+            parent.add(mesh);
+            chunks.set(chunkKey, mesh);
+            console.log(`Generated chunk ${chunkKey} with ${blockCount} blocks, ${faceCount} faces`);
+            return mesh;
+        }
+
+        // Generate planets and moons
+        const originPlanet = new THREE.Group();
+        generateVoxelPlanet(0, 0, 0, 8, originPlanet, 'origin', new THREE.Vector3(0, 0, 0));
+        scene.add(originPlanet);
+        const originLight = new THREE.PointLight(0xffffff, 1, 100);
+        originLight.position.set(20, 20, 20);
+        originPlanet.add(originLight);
+        planets.set('origin', { group: originPlanet, position: new THREE.Vector3(0, 0, 0), radius: 8, light: originLight, moons: [] });
+
+        const starCount = 20;
+        const starFieldRadius = 5000;
+        const billboardMaterial = new THREE.SpriteMaterial({
+            color: 0xffffaa,
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending
+        });
+
+        for (let i = 0; i < starCount; i++) {
+            const lod = new THREE.LOD();
+            const planetGroup = new THREE.Group();
+            const planetRadius = 8;
+            generateVoxelPlanet(0, 0, 0, planetRadius, planetGroup, `star_${i}`, new THREE.Vector3());
+            const billboard = new THREE.Sprite(billboardMaterial);
+            billboard.scale.set(20, 20, 1);
+
+            lod.addLevel(planetGroup, 4000);
+            lod.addLevel(billboard, 6000);
+            lod.update = function(camera) {
+                const distance = camera.position.distanceTo(this.position);
+                const currentLevel = this.getObjectForDistance(distance);
+                this.levels.forEach((level, index) => {
+                    level.object.visible = level.object === currentLevel;
+                });
+                console.log(`Star ${i} LOD distance: ${distance.toFixed(2)}, level: ${currentLevel === planetGroup ? 'voxel' : 'billboard'}`);
+            };
+
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const x = starFieldRadius * Math.sin(phi) * Math.cos(theta);
+            const y = starFieldRadius * Math.sin(phi) * Math.sin(theta);
+            const z = starFieldRadius * Math.cos(phi);
+            lod.position.set(x, y, z);
+
+            const planetLight = new THREE.PointLight(0xffffff, 1, 100);
+            planetLight.position.set(20, 20, 20);
+            planetGroup.add(planetLight);
+            scene.add(lod);
+
+            // Add moons
+            const moonCount = Math.floor(Math.random() * 3) + 1;
+            const moons = [];
+            for (let j = 0; j < moonCount; j++) {
+                const moonGroup = new THREE.LOD();
+                const moonPlanet = new THREE.Group();
+                const moonRadius = planetRadius * 0.5;
+                generateVoxelPlanet(0, 0, 0, moonRadius, moonPlanet, `moon_${i}_${j}`, new THREE.Vector3(), true);
+                const moonBillboard = new THREE.Sprite(billboardMaterial);
+                moonBillboard.scale.set(10, 10, 1);
+                moonGroup.addLevel(moonPlanet, 2000);
+                moonGroup.addLevel(moonBillboard, 3000);
+                moonGroup.update = lod.update;
+
+                const moonOrbit = 50 + Math.random() * 50;
+                moonGroup.position.set(moonOrbit, 0, 0);
+                moonGroup.userData = { orbitRadius: moonOrbit, orbitSpeed: 0.001 + Math.random() * 0.002, parentPlanet: lod };
+                const moonLight = new THREE.PointLight(0xffffff, 0.5, 50);
+                moonLight.position.set(10, 10, 10);
+                moonPlanet.add(moonLight);
+                scene.add(moonGroup);
+                moons.push({ group: moonGroup, radius: moonRadius, light: moonLight });
+            }
+
+            planets.set(`star_${i}`, { group: lod, position: new THREE.Vector3(x, y, z), radius: planetRadius, light: planetLight, moons });
+            console.log(`Added star ${i} at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) with ${moonCount} moons`);
+        }
+
+        // Generate comets
+        for (let i = 0; i < 3; i++) {
+            const comet = new THREE.Mesh(
+                new THREE.SphereGeometry(2, 16, 16),
+                new THREE.MeshBasicMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 1 })
+            );
+            const startPos = new THREE.Vector3(
+                (Math.random() - 0.5) * 10000,
+                (Math.random() - 0.5) * 10000,
+                (Math.random() - 0.5) * 10000
+            );
+            const direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+            comet.position.copy(startPos);
+            comet.userData = { isComet: true, direction, speed: 50 + Math.random() * 50 };
+            scene.add(comet);
+            comets.push(comet);
+        }
+
+        // Weather particle systems
+        const particleSystems = new Map();
+        function createWeatherParticles(planetId, position, particleColor) {
+            const geometry = new THREE.BufferGeometry();
+            const vertices = [];
+            for (let i = 0; i < 500; i++) {
+                vertices.push(
+                    (Math.random() - 0.5) * 50,
+                    (Math.random() - 0.5) * 50,
+                    (Math.random() - 0.5) * 50
+                );
+            }
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+            const material = new THREE.PointsMaterial({ color: particleColor, size: 0.2, transparent: true });
+            const particles = new THREE.Points(geometry, material);
+            particles.position.copy(position);
+            particles.userData = { planetId, lifetime: 10 };
+            scene.add(particles);
+            particleSystems.set(`${planetId}_${Date.now()}`, particles);
+        }
+
+        // Player movement with jetpack
+        let velocity = new THREE.Vector3();
+        let direction = new THREE.Vector3();
+        let moveSpeed = 0.1;
+        let jetpackFuel = 100;
+        let speedBoost = 1;
+        let boostTimer = 0;
+        const speedIncrement = 0.5;
+        const maxSpeed = 10.0;
+        const minSpeed = 0.05;
+        const gravityStrength = 0.02;
+        const fuelConsumption = 10;
+        const fuelRegen = 5;
+        const keys = {};
+
+        document.addEventListener('keydown', (e) => keys[e.code] = true);
+        document.addEventListener('keyup', (e) => keys[e.code] = false);
+        document.addEventListener('wheel', (e) => {
+            moveSpeed += e.deltaY > 0 ? -speedIncrement : speedIncrement;
+            moveSpeed = Math.max(minSpeed, Math.min(maxSpeed, moveSpeed));
+            console.log(`Jetpack thrust: ${moveSpeed.toFixed(2)}`);
+        });
+
+        function updatePlayer(delta) {
+            velocity.set(0, 0, 0);
+            direction.set(0, 0, 0);
+            let isThrusting = false;
+            if (keys['KeyW']) direction.z -= 1;
+            if (keys['KeyS']) direction.z += 1;
+            if (keys['KeyA']) direction.x -= 1;
+            if (keys['KeyD']) direction.x += 1;
+            if (keys['Space'] && jetpackFuel > 0) {
+                direction.y += 1;
+                isThrusting = true;
+                jetpackFuel = Math.max(0, jetpackFuel - fuelConsumption * delta);
+            }
+
+            if (!isThrusting) {
+                jetpackFuel = Math.min(100, jetpackFuel + fuelRegen * delta);
+            }
+
+            direction.normalize();
+            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(controls.getObject().quaternion);
+            const right = new THREE.Vector3(1, 0, 0).applyQuaternion(controls.getObject().quaternion);
+            const up = new THREE.Vector3(0, 1, 0).applyQuaternion(controls.getObject().quaternion);
+            velocity.add(forward.multiplyScalar(direction.z * moveSpeed * speedBoost));
+            velocity.add(right.multiplyScalar(direction.x * moveSpeed * speedBoost));
+            velocity.add(up.multiplyScalar(direction.y * moveSpeed * speedBoost));
+
+            // Apply gravity
+            let nearestPlanet = null;
+            let minDistance = Infinity;
+            let nearestPlanetId = null;
+            planets.forEach((planet, id) => {
+                const dist = camera.position.distanceTo(planet.position);
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    nearestPlanet = planet;
+                    nearestPlanetId = id;
+                }
+                planet.moons.forEach(moon => {
+                    const moonDist = camera.position.distanceTo(moon.group.position);
+                    if (moonDist < minDistance) {
+                        minDistance = moonDist;
+                        nearestPlanet = moon;
+                        nearestPlanetId = id + `_moon`;
+                    }
+                });
+            });
+
+            if (nearestPlanet && minDistance > nearestPlanet.radius + 5) {
+                const gravityDirection = nearestPlanet.position.clone().sub(camera.position).normalize();
+                velocity.add(gravityDirection.multiplyScalar(gravityStrength));
+            }
+
+            camera.position.add(velocity);
+
+            // Update speed boost
+            if (boostTimer > 0) {
+                boostTimer -= delta;
+                if (boostTimer <= 0) {
+                    speedBoost = 1;
+                    console.log('Speed boost expired');
+                }
+            }
+
+            // Unload distant chunks
+            const unloadDistance = 6000;
+            chunks.forEach((chunk, chunkKey) => {
+                const planetId = chunkKey.split('_')[0];
+                const planet = planets.get(planetId);
+                if (!planet) return;
+                const dist = camera.position.distanceTo(planet.position);
+                if (dist > unloadDistance) {
+                    chunk.parent.remove(chunk);
+                    chunks.delete(chunkKey);
+                    console.log(`Unloaded chunk ${chunkKey} at distance ${dist.toFixed(2)}`);
+                }
+            });
+
+            // Update day/night cycle
+            planets.forEach((planet, id) => {
+                const light = planet.light;
+                const angle = Date.now() * 0.0005;
+                light.position.set(
+                    Math.cos(angle) * 20,
+                    Math.sin(angle) * 10 + 10,
+                    Math.sin(angle) * 20
+                );
+
+                // Update moons
+                planet.moons.forEach(moon => {
+                    const moonAngle = Date.now() * moon.group.userData.orbitSpeed;
+                    moon.group.position.set(
+                        Math.cos(moonAngle) * moon.group.userData.orbitRadius,
+                        0,
+                        Math.sin(moonAngle) * moon.group.userData.orbitRadius
+                    );
+                    moon.group.position.add(planet.position);
+                });
+
+                // Spawn weather particles
+                if (Math.random() < 0.01 && minDistance < 100 && nearestPlanetId === id) {
+                    createWeatherParticles(id, planet.position, planetTypes[parseInt(id.split('_')[1] || 0) % planetTypes.length].particleColor);
+                }
+            });
+
+            // Update particles
+            particleSystems.forEach((particles, key) => {
+                particles.userData.lifetime -= delta;
+                if (particles.userData.lifetime <= 0) {
+                    scene.remove(particles);
+                    particleSystems.delete(key);
+                }
+            });
+
+            // Update comets
+            comets.forEach(comet => {
+                comet.position.add(comet.userData.direction.clone().multiplyScalar(comet.userData.speed * delta));
+                if (comet.position.length() > 15000) {
+                    comet.position.set(
+                        (Math.random() - 0.5) * 10000,
+                        (Math.random() - 0.5) * 10000,
+                        (Math.random() - 0.5) * 10000
+                    );
+                    comet.userData.direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+                    comet.userData.speed = 50 + Math.random() * 50;
+                }
+            });
+
+            // Update HUD
+            const hud = document.getElementById('hud');
+            const planetType = nearestPlanet ? planetTypes[parseInt(nearestPlanetId.split('_')[1] || 0) % planetTypes.length].name : 'None';
+            hud.innerHTML = `
+                Jetpack Thrust: ${moveSpeed.toFixed(2)}<br>
+                Fuel: ${jetpackFuel.toFixed(1)}%<br>
+                Speed Boost: ${speedBoost.toFixed(1)}x<br>
+                Nearest Planet: ${planetType}<br>
+                Distance: ${minDistance.toFixed(2)} units<br>
+                Inventory: Stone: ${inventory.stone}, Ice: ${inventory.ice}, Grass: ${inventory.grass}<br>
+                Beacons: ${beacons.size}
+            `;
+        }
+
+        // Block, artifact, and beacon interaction
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const reach = 10;
+
+        document.addEventListener('mousedown', (e) => {
+            if (!controls.isLocked) return;
+            mouse.set(0, 0);
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children, true);
+
+            for (const intersect of intersects) {
+                const obj = intersect.object;
+                if (obj.userData.isChunk) {
+                    const chunk = obj;
+                    const chunkKey = chunk.userData.chunkKey;
+                    const blocks = chunk.userData.blocks;
+                    const point = intersect.point.clone().sub(chunk.position);
+                    const localPos = point.sub(new THREE.Vector3(0.5, 0.5, 0.5)).divideScalar(blockSize);
+                    const x = Math.floor(localPos.x + chunkSize / 2);
+                    const y = Math.floor(localPos.y + chunkSize / 2);
+                    const z = Math.floor(localPos.z + chunkSize / 2);
+
+                    if (x < 0 || x >= chunkSize || y < 0 || y >= chunkSize || z < 0 || z >= chunkSize) continue;
+
+                    const planetId = chunkKey.split('_')[0];
+                    const typeIndex = parseInt(planetId.split('_')[1] || 0) % planetTypes.length;
+                    const resource = planetTypes[typeIndex].resource;
+
+                    if (e.button === 0 && blocks[x][y][z]) { // Left-click to break
+                        blocks[x][y][z] = 0;
+                        inventory[resource]++;
+                        scene.remove(chunk);
+                        const parent = chunk.parent;
+                        generateVoxelPlanet(0, 0, 0, 8, parent, planetId, parent.position, planetId.includes('moon'));
+                        console.log(`Removed block at (${x},${y},${z}) in chunk ${chunkKey}, gained ${resource}`);
+                    } else if (e.button === 2 && inventory[resource] > 0) { // Right-click to place beacon
+                        const normal = intersect.face.normal;
+                        const nx = x + Math.round(normal.x);
+                        const ny = y + Math.round(normal.y);
+                        const nz = z + Math.round(normal.z);
+                        if (nx >= 0 && nx < chunkSize && ny >= 0 && ny < chunkSize && nz >= 0 && nz < chunkSize && !blocks[nx][ny][nz]) {
+                            inventory[resource]--;
+                            const beacon = new THREE.Mesh(
+                                new THREE.BoxGeometry(1, 1, 1),
+                                new THREE.MeshBasicMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 1 })
+                            );
+                            beacon.position.set(
+                                chunk.position.x + nx - chunkSize / 2 + 0.5,
+                                chunk.position.y + ny - chunkSize / 2 + 0.5,
+                                chunk.position.z + nz - chunkSize / 2 + 0.5
+                            );
+                            beacon.userData = { isBeacon: true, planetId };
+                            parent.add(beacon);
+                            beacons.set(`${planetId}_${nx}_${ny}_${nz}`, beacon);
+                            console.log(`Placed beacon at (${nx},${ny},${nz}) in chunk ${chunkKey}`);
+                        }
+                    }
+                    break;
+                } else if (obj.userData.isArtifact && e.button === 0) { // Collect artifact
+                    const planetId = obj.userData.planetId;
+                    const artifactKey = `${planetId}_${Math.floor(obj.position.x)}_${Math.floor(obj.position.y)}_${Math.floor(obj.position.z)}`;
+                    artifacts.delete(artifactKey);
+                    obj.parent.remove(obj);
+                    if (obj.userData.boost === 'speed') {
+                        speedBoost = 2;
+                        boostTimer = 10;
+                        console.log('Collected speed boost artifact!');
+                    }
+                    break;
+                } else if (obj.userData.isComet && e.button === 0) { // Collect comet
+                    const typeIndex = Math.floor(Math.random() * planetTypes.length);
+                    const resource = planetTypes[typeIndex].resource;
+                    inventory[resource] += 5;
+                    obj.position.set(
+                        (Math.random() - 0.5) * 10000,
+                        (Math.random() - 0.5) * 10000,
+                        (Math.random() - 0.5) * 10000
+                    );
+                    obj.userData.direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+                    obj.userData.speed = 50 + Math.random() * 50;
+                    console.log(`Collected comet, gained 5 ${resource}`);
+                    break;
+                } else if (obj.userData.isBeacon && e.button === 0) { // Teleport to another beacon
+                    if (beacons.size > 1) {
+                        const beaconKeys = Array.from(beacons.keys());
+                        const currentKey = `${obj.userData.planetId}_${Math.floor(obj.position.x)}_${Math.floor(obj.position.y)}_${Math.floor(obj.position.z)}`;
+                        const otherBeacons = beaconKeys.filter(key => key !== currentKey);
+                        if (otherBeacons.length > 0) {
+                            const targetKey = otherBeacons[Math.floor(Math.random() * otherBeacons.length)];
+                            const targetBeacon = beacons.get(targetKey);
+                            camera.position.copy(targetBeacon.position).add(new THREE.Vector3(0, 2, 0));
+                            console.log(`Teleported to beacon at ${targetKey}`);
+                        }
+                    }
+                    break;
+                }
+            }
+        });
+
+        // Animation loop
+        let lastTime = 0;
+        function animate(time) {
+            requestAnimationFrame(animate);
+            const delta = (time - lastTime) / 1000;
+            lastTime = time;
+
+            updatePlayer(delta);
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
