@@ -645,36 +645,36 @@
 
             updatePlayer(delta);
             
-            // Update frustum for culling
-            cameraMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-            frustum.setFromProjectionMatrix(cameraMatrix);
-            
-            // Apply frustum culling to planets and moons
+            // Simplified culling - distance-based only for better compatibility
             planets.forEach((planet, id) => {
                 const distanceToCamera = camera.position.distanceTo(planet.position);
-                const isInFrustum = frustum.intersectsObject(planet.group);
                 
-                // Only render if in frustum and within reasonable distance
-                planet.group.visible = isInFrustum && distanceToCamera < 8000;
+                // Always keep origin planet visible, use distance-based culling for others
+                if (id === 'origin') {
+                    planet.group.visible = true;
+                } else {
+                    planet.group.visible = distanceToCamera < 8000;
+                }
                 
                 // Update LOD for visible planets only
                 if (planet.group.visible && planet.group.update) {
                     planet.group.update(camera);
                 }
                 
-                // Cull moons based on distance and frustum
+                // Distance-based moon culling
                 planet.moons.forEach(moon => {
                     const moonDistance = camera.position.distanceTo(moon.group.position);
-                    const moonInFrustum = frustum.intersectsObject(moon.group);
-                    moon.group.visible = moonInFrustum && moonDistance < 4000;
+                    moon.group.visible = moonDistance < 4000;
                 });
             });
             
-            // Cull comets
+            // Ensure skybox is always visible
+            skybox.visible = true;
+            
+            // Distance-based comet culling
             comets.forEach(comet => {
                 const cometDistance = camera.position.distanceTo(comet.position);
-                const cometInFrustum = frustum.intersectsObject(comet);
-                comet.visible = cometInFrustum && cometDistance < 6000;
+                comet.visible = cometDistance < 6000;
             });
             
             renderer.render(scene, camera);
